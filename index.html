@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>India COVID District Map</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100vh; background: #0a0a0a; font-family: sans-serif; }
+    #map { width: 100%; height: 100%; }
+    #loading {
+      position: fixed; inset: 0; background: #0a0a0a;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      color: white; gap: 14px; z-index: 9999;
+    }
+    .spinner {
+      width: 40px; height: 40px; border: 3px solid #333;
+      border-top-color: #5f6fff; border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    #status { font-size: 13px; color: #888; }
+    #error {
+      position: fixed; inset: 0; background: #0a0a0a;
+      display: none; flex-direction: column;
+      align-items: center; justify-content: center;
+      color: white; gap: 10px;
+    }
+    #error h2 { color: #ff6b6b; }
+    #error p { font-size: 13px; color: #888; max-width: 400px; text-align: center; }
+    #params-bar {
+      position: fixed; top: 10px; left: 50%; transform: translateX(-50%);
+      background: rgba(0,0,0,0.7); color: #aaa; font-size: 11px;
+      padding: 4px 12px; border-radius: 20px; z-index: 999;
+      display: none;
+    }
+  </style>
+</head>
+<body>
+  <div id="loading">
+    <div class="spinner"></div>
+    <h2 style="font-size:18px;font-weight:500">Loading COVID Map</h2>
+    <p id="status">Starting up...</p>
+  </div>
+  <div id="error">
+    <h2>Failed to load map</h2>
+    <p id="error-msg">Unknown error.</p>
+  </div>
+  <div id="params-bar"></div>
+  <div id="map"></div>
+
+  <!-- Kepler.gl standalone bundle -->
+  <script src="https://unpkg.com/kepler.gl@2.5.5/umd/keplergl.min.js"></script>
+
+  <script>
+  // ── CONFIG ────────────────────────────────────────────────────────────────
+  const SUPABASE_URL  = 'https://fwislxitkodhieukfack.supabase.co';
+  const SUPABASE_KEY  = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZ3aXNseGl0a29kaGlldWtmYWNrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA0NjA5MDcsImV4cCI6MjA5NjAzNjkwN30.VWK-Kz6BiY4PjQrsTGv4z3fpUcb1Fd4ygfy3UYl6xDc';
+  const GEOJSON_URL   = 'https://raw.githubusercontent.com/imtanmay46/kepler-map/main/LGD_Districts_simplified.json';
+  const MAPBOX_TOKEN  = "";
+
+  // ── URL PARAMS ────────────────────────────────────────────────────────────
+  function getParams() {
+    const p = new URLSearchParams(window.location.search);
+    return {
+      state:     (p.get('state') || '').trim().toUpperCase(),
+      confirmed: parseInt(p.get('confirmed') || '0', 10),
+      recovered: parseInt(p.get('recovered') || '0', 10),
+      deceased:  parseInt(p.get('deceased')  || '0', 10),
+    };
+  }
+
+  function setStatus(msg) {
+    const el = document.getElementById('status');
+    if (el) el.textContent = msg;
+  }
+
+  function showError(msg) {
+    document.getElementById('loading').style.display = 'none';
+    const e = document.getElementById('error');
+    e.style.display = 'flex';
+    document.getElementById('error-msg').textContent = msg;
+  }
+
+  // ── FETCH SUPABASE ────────────────────────────────────────────────────────
+  async function fetchData(params) {
+    let url = `${SUPABASE_URL}/rest/v1/district_metrics?select=state,district,confirmed,recovered,deceased,tested`;
+    if (params.state)     url += `&state=eq.${encodeURIComponent(params.state)}`;
+    if (params.confirmed) url += `&confirmed=gte.${params.confirmed}`;
+    if (params.recovered) url += `&recovered=gte.${params.recovered}`;
+    if (params.deceased)  url += `&deceased=gte.${params.deceased}`;
+    url += '&limit=1000';
+
+    const res = await fetch(url, {
+      headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` }
+    });
+    if (!res.ok) throw new Error(`Supabase error ${res.status}`);
+    return res.json();
+  }
+
+  // ── FETCH GEOJSON ─────────────────────────────────────────────────────────
+  async function fetchGeoJSON() {
+    const res = await fetch(GEOJSON_URL);
+    if (!res.ok) throw new Error(`GeoJSON error ${res.status}`);
+    return res.json();
+  }
+
+  // ── MERGE ─────────────────────────────────────────────────────────────────
+  function merge(geojson, rows, params) {
+    // Build lookup keyed by lowercase district name
+    const lookup = {};
+    for (const row of rows) {
+      lookup[(row.district || '').toLowerCase().trim()] = row;
+    }
+
+    const features = geojson.features
+      .filter(f => {
+        if (!params.state) return true;
+        return (f.properties.stname || '').toUpperCase() === params.state;
+      })
+      .map(f => {
+        const key = (f.properties.dtname || '').toLowerCase().trim();
+        const row = lookup[key] || {};
+        return {
+          ...f,
+          properties: {
+            ...f.properties,
+            district:  f.properties.dtname  || '',
+            state:     f.properties.stname  || '',
+            confirmed: row.confirmed ?? f.properties.confirmed ?? 0,
+            recovered: row.recovered ?? f.properties.recovered ?? 0,
+            deceased:  row.deceased  ?? f.properties.deceased  ?? 0,
+            tested:    row.tested    ?? f.properties.tested    ?? 0,
+          }
+        };
+      });
+
+    return { ...geojson, features };
+  }
+
+  // ── CENTROIDS FOR HEATMAP ─────────────────────────────────────────────────
+  function centroids(geojson) {
+    return geojson.features.map(f => {
+      try {
+        let ring = f.geometry.type === 'Polygon'
+          ? f.geometry.coordinates[0]
+          : f.geometry.coordinates[0][0];
+        const lng = ring.reduce((s,c) => s + c[0], 0) / ring.length;
+        const lat = ring.reduce((s,c) => s + c[1], 0) / ring.length;
+        return { lat, lng, ...f.properties };
+      } catch { return null; }
+    }).filter(Boolean);
+  }
+
+  // ── MAIN ──────────────────────────────────────────────────────────────────
+  async function main() {
+    const params = getParams();
+
+    // Show active filters in bar
+    const active = Object.entries(params).filter(([,v]) => v).map(([k,v]) => `${k}=${v}`);
+    if (active.length) {
+      const bar = document.getElementById('params-bar');
+      bar.textContent = 'Filters: ' + active.join(' | ');
+      bar.style.display = 'block';
+    }
+
+    try {
+      setStatus('Fetching boundaries...');
+      const [geojson, rows] = await Promise.all([
+        fetchGeoJSON(),
+        fetchData(params).catch(e => { console.warn('Supabase fetch failed, using GeoJSON data', e); return []; })
+      ]);
+
+      setStatus('Merging data...');
+      const merged  = merge(geojson, rows, params);
+      const points  = centroids(merged);
+
+      setStatus('Rendering map...');
+
+      // Build CSV rows for Kepler
+      const polyRows  = merged.features.map(f => ({
+        _geojson:  JSON.stringify(f.geometry),
+        district:  f.properties.district,
+        state:     f.properties.state,
+        confirmed: f.properties.confirmed,
+        recovered: f.properties.recovered,
+        deceased:  f.properties.deceased,
+        tested:    f.properties.tested,
+      }));
+
+      const keplerData = {
+        datasets: [
+          {
+            info: { id: 'districts', label: 'Districts' },
+            data: {
+              fields: [
+                { name: '_geojson',  format: '', type: 'geojson'  },
+                { name: 'district',  format: '', type: 'string'   },
+                { name: 'state',     format: '', type: 'string'   },
+                { name: 'confirmed', format: '', type: 'integer'  },
+                { name: 'recovered', format: '', type: 'integer'  },
+                { name: 'deceased',  format: '', type: 'integer'  },
+                { name: 'tested',    format: '', type: 'integer'  },
+              ],
+              rows: polyRows.map(r => [
+                r._geojson, r.district, r.state,
+                r.confirmed, r.recovered, r.deceased, r.tested
+              ])
+            }
+          },
+          {
+            info: { id: 'heatmap', label: 'Heatmap' },
+            data: {
+              fields: [
+                { name: 'lat',       format: '', type: 'real'    },
+                { name: 'lng',       format: '', type: 'real'    },
+                { name: 'confirmed', format: '', type: 'integer' },
+                { name: 'district',  format: '', type: 'string'  },
+              ],
+              rows: points.map(p => [p.lat, p.lng, p.confirmed, p.district])
+            }
+          }
+        ],
+        config: {
+          version: 'v1',
+          config: {
+            visState: {
+              layers: [
+                {
+                  id: 'poly', type: 'geojson',
+                  config: {
+                    dataId: 'districts', label: 'Districts',
+                    isVisible: true,
+                    columns: { geojson: '_geojson' },
+                    visConfig: {
+                      opacity: 0.6, stroked: true, filled: true,
+                      strokeColor: [200,200,200],
+                      colorRange: {
+                        colors: ['#ffffb2','#fed976','#feb24c','#fd8d3c','#f03b20','#bd0026']
+                      }
+                    },
+                    colorField: { name: 'confirmed', type: 'integer' },
+                    colorScale: 'quantile',
+                  }
+                },
+                {
+                  id: 'heat', type: 'heatmap',
+                  config: {
+                    dataId: 'heatmap', label: 'Heatmap',
+                    isVisible: true,
+                    columns: { lat: 'lat', lng: 'lng' },
+                    visConfig: {
+                      opacity: 0.7, radius: 25,
+                      colorRange: {
+                        colors: ['#0000ff','#00ffff','#00ff00','#ffff00','#ff6600','#ff0000']
+                      }
+                    },
+                    weightField: { name: 'confirmed', type: 'integer' },
+                  }
+                }
+              ],
+              interactionConfig: {
+                tooltip: {
+                  enabled: true,
+                  fieldsToShow: {
+                    districts: [
+                      { name: 'district' }, { name: 'state' },
+                      { name: 'confirmed' }, { name: 'recovered' },
+                      { name: 'deceased' }, { name: 'tested' }
+                    ]
+                  }
+                }
+              }
+            },
+            mapState: { latitude: 22.5, longitude: 82.5, zoom: 4.2 },
+            mapStyle: { styleType: 'dark' }
+          }
+        },
+        options: { centerMap: true, readOnly: false }
+      };
+
+      // Mount Kepler
+      KeplerGl.embed(
+        document.getElementById('map'),
+        { mapboxApiAccessToken: MAPBOX_TOKEN, width: window.innerWidth, height: window.innerHeight },
+        keplerData
+      );
+
+      document.getElementById('loading').style.display = 'none';
+
+    } catch(err) {
+      console.error(err);
+      showError(err.message);
+    }
+  }
+
+  window.addEventListener('load', main);
+  </script>
+</body>
+</html>
